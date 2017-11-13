@@ -1,0 +1,34 @@
+language: python
+sudo: false
+cache:
+  directories:
+  - "$HOME/.cache/pip"
+env:
+  # global:
+  # CODECOV_REPO_TOKEN=<token>
+  # - secure: 
+matrix:
+  include:
+  - python: '2.7'
+    env:
+    - COVERAGE="true"
+    - SKIP_TESTS="false"
+    - CODECOV_COVERAGE_REPORT="false"
+  - python: '3.5'
+    env:
+    - COVERAGE="true"
+    - SKIP_TESTS="false"
+    - CODECOV_COVERAGE_REPORT="true"
+before_install:
+  - pwd
+  - ls -la
+  - echo ${PATH}
+  - python --version
+install: bash ci/travis/install.sh
+script: python setup.py test
+after_success: bash ci/travis/after_success.sh
+notifications:
+  # slack:
+    # slack credential key
+    # secure: 
+  email: false
