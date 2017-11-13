@@ -12,8 +12,6 @@ import re
 import inspect
 import sqlparse
 
-from decorator import decorator
-
 
 DEFAULT_EXCLUDE = '.svn,CVS,.bzr,.hg,.git'
 DEFAULT_IGNORE = 'E24'
