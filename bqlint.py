@@ -12,8 +12,6 @@ import re
 import inspect
 import sqlparse
 
-from decorator import decorator
-
 
 DEFAULT_EXCLUDE = '.svn,CVS,.bzr,.hg,.git'
 DEFAULT_IGNORE = 'E24'
@@ -148,16 +146,10 @@ def maximum_line_length(physical_line):
     """
     line = physical_line.rstrip()
     length = len(line)
-    if length > MAX_LINE_LENGTH:
-        try:
-            # The line could contain multi-byte characters
-            if not hasattr(line, 'decode'):   # Python 3
-                line = line.encode('latin-1')
-            length = len(line.decode('utf-8'))
-        except UnicodeDecodeError:
-            pass
+
     if length > MAX_LINE_LENGTH:
         return MAX_LINE_LENGTH, "E501 line too long (%d characters)" % length
+
 
 def dont_use_hypen_comment(physical_line):
     """
@@ -169,6 +161,34 @@ def dont_use_hypen_comment(physical_line):
         return offset, "W000 Don't use `--` comment string, you shoudld use `#` comment style"
     except ValueError:
         pass
+
+
+##############################################################################
+# Plugins (check functions) for tokens
+##############################################################################
+
+def use_upper_case_keyword(token: sqlparse.sql.Token, offset):
+    if token.is_keyword and not token.value.isupper():
+        return offset, f"W000 Use upper case for keyword `{token}`"
+
+
+def use_explicit_alias(token: sqlparse.sql.Token, offset):
+
+    if token.ttype == sqlparse.tokens.Name:
+        identifier = token.parent
+        while not identifier.get_name():
+            identifier = identifier.parent
+
+        if identifier.get_alias() is None \
+                and identifier.get_alias() != identifier.get_name():
+            return
+
+        if not any(
+            token.is_keyword and token.normalized == 'AS'
+            for token in identifier.flatten()
+        ):
+            return offset, f"W000 Alias needs keywords"
+
 
 
 ##############################################################################
@@ -185,7 +205,7 @@ def find_checks(argument_name):
         if not inspect.isfunction(function):
             continue
 
-        args = inspect.getargspec(function)[0]
+        args = inspect.getfullargspec(function)[0]
         if args and args[0].startswith(argument_name):
             checks.append((name, function, args))
 
@@ -193,29 +213,37 @@ def find_checks(argument_name):
     return checks
 
 
-class Checker(object):
-    """
-    Load a Python source file, tokenize it, check coding style.
-    """
+class Checker():
 
-    def __init__(self, filename, lines=None):
-        self.filename = filename
-        if filename is None:
-            self.filename = 'stdin'
-            self.lines = lines or []
-        elif lines is None:
-            self.lines = readlines(filename)
-        else:
-            self.lines = lines
-        options.counters['physical lines'] += len(self.lines)
+    def __init__(self, file_path):
+        self.file_path = file_path if file_path else None
 
-    def readline(self):
+
+    def check_physical(self, line):
         """
-        Get the next line from the input buffer.
+        Run all physical checks on a raw input line.
         """
-        for nl, line in enumerate(self.lines):
-            self.line_number = nl
-            yield line
+        self.physical_line = line
+        self.indent_char = ' '
+        for name, check, argument_names in options.physical_checks:
+            result = self.run_check(check, argument_names)
+            if result is not None:
+                offset, text = result
+                self.report_error(self.line_number, offset, text, check)
+
+
+    def check_token(self, token, offset):
+        """
+        Run all physical checks on a raw input line.
+        """
+        self.token = token
+        self.offset = offset
+        for name, check, argument_names in options.token_checks:
+            result = self.run_check(check, argument_names)
+            if result is not None:
+                offset, text = result
+                self.report_error(self.line_number, offset, text, check)
+
 
     def run_check(self, check, argument_names):
         """
@@ -226,159 +254,31 @@ class Checker(object):
             arguments.append(getattr(self, name))
         return check(*arguments)
 
-    def check_physical(self, line):
-        """
-        Run all physical checks on a raw input line.
-        """
-        self.physical_line = line
-        if self.indent_char is None and len(line) and line[0] in ' \t':
-            self.indent_char = line[0]
-        for name, check, argument_names in options.physical_checks:
-            result = self.run_check(check, argument_names)
-            if result is not None:
-                offset, text = result
-                self.report_error(self.line_number, offset, text, check)
 
-    def build_tokens_line(self):
-        """
-        Build a logical line from tokens.
-        """
-        self.mapping = []
-        logical = []
-        length = 0
-        previous = None
-        for token in self.tokens:
-            token_type, text = token[0:2]
-            if token_type in SKIP_TOKENS:
-                continue
-            if token_type == tokenize.STRING:
-                text = mute_string(text)
-            if previous:
-                end_line, end = previous[3]
-                start_line, start = token[2]
-                if end_line != start_line:  # different row
-                    prev_text = self.lines[end_line - 1][end - 1]
-                    if prev_text == ',' or (prev_text not in '{[('
-                                            and text not in '}])'):
-                        logical.append(' ')
-                        length += 1
-                elif end != start:  # different column
-                    fill = self.lines[end_line - 1][end:start]
-                    logical.append(fill)
-                    length += len(fill)
-            self.mapping.append((length, token))
-            logical.append(text)
-            length += len(text)
-            previous = token
-        self.logical_line = ''.join(logical)
-        assert self.logical_line.lstrip() == self.logical_line
-        assert self.logical_line.rstrip() == self.logical_line
+    def run(self):
+        tokens = []
+        with open(self.file_path) as fin:
+            self.lines = fin.readlines()
 
-    def check_logical(self):
-        """
-        Build a line from tokens and run all logical checks on it.
-        """
-        options.counters['logical lines'] += 1
-        self.build_tokens_line()
-        first_line = self.lines[self.mapping[0][1][2][0] - 1]
-        indent = first_line[:self.mapping[0][1][2][1]]
-        self.previous_indent_level = self.indent_level
-        self.indent_level = expand_indent(indent)
-        if options.verbose >= 2:
-            print(self.logical_line[:80].rstrip())
-        for name, check, argument_names in options.logical_checks:
-            if options.verbose >= 4:
-                print('   ' + name)
-            result = self.run_check(check, argument_names)
-            if result is not None:
-                offset, text = result
-                if isinstance(offset, tuple):
-                    original_number, original_offset = offset
-                else:
-                    for token_offset, token in self.mapping:
-                        if offset >= token_offset:
-                            original_number = token[2][0]
-                            original_offset = (token[2][1]
-                                               + offset - token_offset)
-                self.report_error(original_number, original_offset,
-                                  text, check)
-        self.previous_logical = self.logical_line
-
-    def check_all(self, expected=None, line_offset=0):
-        """
-        Run all checks on the input file.
-        """
-        self.expected = expected or ()
-        self.line_offset = line_offset
-        self.line_number = 0
-        self.file_errors = 0
-        self.indent_char = None
-        self.indent_level = 0
-        self.previous_logical = ''
-        self.blank_lines = 0
-        self.blank_lines_before_comment = 0
-        self.tokens = []
-        parens = 0
-        for line in self.readline():
+        for line_number, line in enumerate(self.lines):
+            self.line_number = line_number
             self.check_physical(line)
-            token = sqlparse.split(line)
 
-            # self.tokens.append(token)
-            # token_type, text = token, str(token)
-            # if token_type == tokenize.OP and text in '([{':
-            #     parens += 1
-            # if token_type == tokenize.OP and text in '}])':
-            #     parens -= 1
-            # if token_type == tokenize.NEWLINE and not parens:
-            #     self.check_logical()
-            #     self.blank_lines = 0
-            #     self.blank_lines_before_comment = 0
-            #     self.tokens = []
-            # if token_type == tokenize.NL and not parens:
-            #     if len(self.tokens) <= 1:
-            #         # The physical line contains only this token.
-            #         self.blank_lines += 1
-            #     self.tokens = []
-            # if token_type == tokenize.COMMENT:
-            #     source_line = token[4]
-            #     token_start = token[2][1]
-            #     if source_line[:token_start].strip() == '':
-            #         self.blank_lines_before_comment = max(self.blank_lines,
-            #             self.blank_lines_before_comment)
-            #         self.blank_lines = 0
-            #     if text.endswith('\n') and not parens:
-            #         # The comment also ends a physical line.  This works around
-            #         # Python < 2.6 behaviour, which does not generate NL after
-            #         # a comment which is on a line by itself.
-            #         self.tokens = []
-        return self.file_errors
+            offset = 0
+            tokens = sqlparse.parse(line)[0].flatten()
+            for token in tokens:
+                self.check_token(token, offset)
+                offset += len(str(token))
 
     def report_error(self, line_number, offset, text, check):
         """
         Report an error, according to options.
         """
-        code = text[:4]
-        if ignore_code(code):
-            return
-        if options.quiet == 1 and not self.file_errors:
-            message(self.filename)
-        if code in options.counters:
-            options.counters[code] += 1
-        else:
-            options.counters[code] = 1
-            options.messages[code] = text[5:]
-        if options.quiet or code in self.expected:
-            # Don't care about expected errors or warnings
-            return
-        self.file_errors += 1
-        if options.counters[code] == 1 or options.repeat:
-            print(err_format.format(
-                path=self.filename,
-                line=self.line_offset + line_number,
-                column=offset+1,
-                type='E',
-                message=text
-            ))
+        print(err_format.format(
+            path=self.file_path, line=line_number, column=offset,
+            type=text[0], message=text
+        ))
+
 
 
 def input_file(filename):
@@ -387,7 +287,7 @@ def input_file(filename):
     """
     if options.verbose:
         message('checking ' + filename)
-    errors = Checker(filename).check_all()
+    errors = Checker(filename).run()
 
 
 def input_dir(dirname, runner=None):
@@ -531,6 +431,7 @@ def process_options(arglist=None):
         # The default choice: ignore controversial checks
         options.ignore = DEFAULT_IGNORE.split(',')
     options.physical_checks = find_checks('physical_line')
+    options.token_checks = find_checks('token')
     options.logical_checks = find_checks('logical_line')
     options.counters = dict.fromkeys(BENCHMARK_KEYS, 0)
     options.messages = {}

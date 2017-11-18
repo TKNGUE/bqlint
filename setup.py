@@ -5,11 +5,12 @@ from setuptools import setup, find_packages
 
 setup(
     name='bqlint',
-    version='0.0.1',
+    version='0.0.4',
     description="A linter for BigQuery's Standard SQL",
     author='TKNGUE',
     license='MIT',
-    packages=find_packages(),
+    url='https://github.com/TKNGUE/bqlint',
+    py_modules=['bqlint'],
     include_package_data=True,
     install_requires=[
         'sqlparse'
@@ -22,7 +23,7 @@ setup(
     },
     entry_points={
     'console_scripts': [
-        'bqlint = bqlint:_main',
+            'bqlint=bqlint:_main',
         ],
     },
 )
